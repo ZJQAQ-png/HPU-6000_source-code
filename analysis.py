@@ -1,289 +1,161 @@
-
-
 # -*- coding: utf-8 -*-
-import json
 import math
-import os
- 
 import numpy as np
 from scipy import stats
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch
-from statsmodels.stats.proportion import proportions_ztest, proportion_confint
-from statsmodels.stats.power import NormalIndPower
-from statsmodels.stats.proportion import proportion_effectsize
- 
-BASE = os.path.dirname(os.path.abspath(__file__))
-np.random.seed(6000)
- 
+from matplotlib import font_manager
 
-n_A, x_A = 1200, 72
-n_B, x_B = 1180, 95
-ALPHA = 0.05            # one-sided
-ALPHA_TWO = 0.05        # two-sided reference
- 
-p_A = x_A / n_A
-p_B = x_B / n_B
-diff = p_B - p_A
-rel_lift = diff / p_A
- 
-R = {}
-R["data"] = dict(n_A=n_A, x_A=x_A, n_B=n_B, x_B=x_B, alpha=ALPHA)
-R["rates"] = dict(p_A=p_A, p_B=p_B, diff=diff, rel_lift=rel_lift,
-                  lift_pp=diff * 100)
- 
+# ----------------------------------------------------------------------
+# 0. 原始数据（一周分流测试）
+# ----------------------------------------------------------------------
+n_A, x_A = 1200, 72      # 对照组：访客数、购买数
+n_B, x_B = 1180, 95      # 实验组：访客数、购买数
+alpha = 0.05             # 预先设定的单侧显著性水平
 
+# ----------------------------------------------------------------------
+# 1. 原始转化率
+# ----------------------------------------------------------------------
+p_A, p_B = x_A / n_A, x_B / n_B
+delta = p_B - p_A
+lift = delta / p_A
+
+# ----------------------------------------------------------------------
+# 2. 双比例 z 检验（合并方差，单侧备择 p_B > p_A）
+# ----------------------------------------------------------------------
 p_pool = (x_A + x_B) / (n_A + n_B)
 se_pool = math.sqrt(p_pool * (1 - p_pool) * (1 / n_A + 1 / n_B))
-z_stat = diff / se_pool
-p_one = 1 - stats.norm.cdf(z_stat)          # one-sided (right tail)
-p_two = 2 * (1 - stats.norm.cdf(abs(z_stat)))
-z_crit_one = stats.norm.ppf(1 - ALPHA)
-z_crit_two = stats.norm.ppf(1 - ALPHA_TWO / 2)
- 
-R["ztest"] = dict(p_pool=p_pool, se_pool=se_pool, z_stat=z_stat,
-                  p_one_sided=p_one, p_two_sided=p_two,
-                  z_crit_one_sided=z_crit_one, z_crit_two_sided=z_crit_two,
-                  reject_one_sided=bool(p_one < ALPHA),
-                  reject_two_sided=bool(p_two < ALPHA_TWO))
- 
+z_stat = delta / se_pool
+p_one_sided = stats.norm.sf(z_stat)
+p_two_sided = 2 * p_one_sided
 
-z_sm, p_sm = proportions_ztest(count=np.array([x_B, x_A]),
-                               nobs=np.array([n_B, n_A]),
-                               alternative="larger")
-R["ztest"]["statsmodels_z"] = float(z_sm)
-R["ztest"]["statsmodels_p_one_sided"] = float(p_sm)
- 
+# 2x2 列联表 Pearson 卡方检验（不作 Yates 校正，df = 1）
+table = np.array([[x_A, n_A - x_A], [x_B, n_B - x_B]])
+chi2, p_chi2, dof, expected = stats.chi2_contingency(table, correction=False)
 
-table = np.array([[x_B, n_B - x_B], [x_A, n_A - x_A]])
-chi2, p_chi, dof, expected = stats.chi2_contingency(table, correction=False)
-chi2_y, p_chi_y, _, _ = stats.chi2_contingency(table, correction=True)
-R["chi2"] = dict(table=table.tolist(), expected=expected.tolist(),
-                 chi2=float(chi2), p_value=float(p_chi), dof=int(dof),
-                 chi2_yates=float(chi2_y), p_value_yates=float(p_chi_y),
-                 z_squared=float(z_stat ** 2),
-                 identity_holds=bool(abs(chi2 - z_stat ** 2) < 1e-8))
- 
+# ----------------------------------------------------------------------
+# 3. 效应量置信区间（非合并方差）
+# ----------------------------------------------------------------------
+se_unpooled = math.sqrt(p_A * (1 - p_A) / n_A + p_B * (1 - p_B) / n_B)
+z_975 = stats.norm.ppf(0.975)
+z_95 = stats.norm.ppf(0.95)
+ci_low_2s, ci_high_2s = delta - z_975 * se_unpooled, delta + z_975 * se_unpooled
+ci_low_1s = delta - z_95 * se_unpooled
 
-odds, p_fisher = stats.fisher_exact(table, alternative="greater")
-R["fisher"] = dict(odds_ratio=float(odds), p_one_sided=float(p_fisher))
- 
+# 每组转化率的 Wilson 95% 置信区间（用于绘图误差线）
+def wilson(x, n, z=z_975):
+    p = x / n
+    den = 1 + z ** 2 / n
+    center = (p + z ** 2 / (2 * n)) / den
+    half = z * math.sqrt(p * (1 - p) / n + z ** 2 / (4 * n ** 2)) / den
+    return center - half, center + half
 
-se_unpool = math.sqrt(p_A * (1 - p_A) / n_A + p_B * (1 - p_B) / n_B)
-ci95_low = diff - z_crit_two * se_unpool
-ci95_high = diff + z_crit_two * se_unpool
-lower_onesided_95 = diff - z_crit_one * se_unpool
+ci_A, ci_B = wilson(x_A, n_A), wilson(x_B, n_B)
 
-se_log_rr = math.sqrt((1 - p_B) / (n_B * p_B) + (1 - p_A) / (n_A * p_A))
-rr = p_B / p_A
-rr_low = math.exp(math.log(rr) - z_crit_two * se_log_rr)
-rr_high = math.exp(math.log(rr) + z_crit_two * se_log_rr)
- 
-R["ci"] = dict(se_unpooled=se_unpool,
-               ci95_diff=[ci95_low, ci95_high],
-               one_sided_lower_95=lower_onesided_95,
-               relative_risk=rr,
-               ci95_rel_lift=[rr_low - 1, rr_high - 1])
- 
+# ----------------------------------------------------------------------
+# 4. 统计功效与最小样本量
+# ----------------------------------------------------------------------
+power_obs = stats.norm.cdf(delta / se_pool - z_95)
 
-R["ci"]["wilson_A"] = list(proportion_confint(x_A, n_A, alpha=0.05, method="wilson"))
-R["ci"]["wilson_B"] = list(proportion_confint(x_B, n_B, alpha=0.05, method="wilson"))
- 
-
-effect_h = proportion_effectsize(p_B, p_A)          # Cohen's h
-power_analysis = NormalIndPower()
-achieved_power = power_analysis.power(effect_size=abs(effect_h),
-                                     nobs1=n_A, ratio=n_B / n_A,
-                                     alpha=ALPHA, alternative="larger")
-R["power"] = dict(cohens_h=float(effect_h),
-                  achieved_power_one_sided=float(achieved_power),
-                  interpretation="P(reject H0 | true effect = observed effect)")
- 
- 
-def required_n(p1, p2, alpha=0.05, target_power=0.80, ratio=1.0):
-    """Closed-form normal approximation for two independent proportions."""
+def min_sample_size(p1, p2, a=0.05, power=0.80):
+    za, zb = stats.norm.ppf(1 - a), stats.norm.ppf(power)
     pbar = (p1 + p2) / 2
-    za = stats.norm.ppf(1 - alpha)          # one-sided
-    zb = stats.norm.ppf(target_power)
-    num = (za * math.sqrt(2 * pbar * (1 - pbar))
-           + zb * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2
-    return math.ceil(num / (p2 - p1) ** 2)
- 
- 
-scenarios = []
-for label, mde_pp in [("Observed effect (+2.05 pp)", diff * 100),
-                      ("MDE = +1.0 pp", 1.0),
-                      ("MDE = +1.5 pp", 1.5),
-                      ("MDE = +2.0 pp", 2.0)]:
-    p2 = p_A + mde_pp / 100
-    n_req = required_n(p_A, p2)
-    h = proportion_effectsize(p2, p_A)
-    n_req_sm = math.ceil(power_analysis.solve_power(
-        effect_size=abs(h), alpha=ALPHA, power=0.80, ratio=1.0,
-        alternative="larger"))
-    scenarios.append(dict(label=label, mde_pp=mde_pp, p2=p2,
-                          n_per_group_closed_form=n_req,
-                          n_per_group_statsmodels=n_req_sm,
-                          total=2 * n_req))
-R["power"]["sample_size_scenarios"] = scenarios
-R["power"]["observed_n_per_group"] = n_A
-R["power"]["shortfall_ratio_observed_effect"] = (
-    scenarios[0]["n_per_group_closed_form"] / n_A)
- 
- 
+    term1 = za * math.sqrt(2 * pbar * (1 - pbar))
+    term2 = zb * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))
+    return math.ceil((term1 + term2) ** 2 / (p2 - p1) ** 2)
 
-plt.rcParams.update({
-    "font.family": "DejaVu Sans",
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "font.size": 11,
-})
-from matplotlib import gridspec
- 
-fig = plt.figure(figsize=(12.4, 6.0), dpi=180)
-gs = gridspec.GridSpec(1, 2, width_ratios=[1.65, 1.0], wspace=0.06, figure=fig)
-ax = fig.add_subplot(gs[0, 0])
-ax_info = fig.add_subplot(gs[0, 1])
-ax_info.axis("off")
- 
-groups = ["A: Control\n(original UI)", "B: Treatment\n(redesigned)"]
+n_min = min_sample_size(p_A, p_B)
+
+def power_at(n_per_group):
+    se = math.sqrt(p_pool * (1 - p_pool) * (2 / n_per_group))
+    return stats.norm.cdf(delta / se - z_95)
+
+# ----------------------------------------------------------------------
+# 5. 分流比例失衡（SRM）健康检查
+# ----------------------------------------------------------------------
+exp_n = (n_A + n_B) / 2
+chi2_srm = (n_A - exp_n) ** 2 / exp_n + (n_B - exp_n) ** 2 / exp_n
+p_srm = stats.chi2.sf(chi2_srm, 1)
+
+# ----------------------------------------------------------------------
+# 6. 输出测试运行结果
+# ----------------------------------------------------------------------
+print("=" * 62)
+print("DSCI 6000 作业1 | A/B 测试统计输出（单侧 alpha = 0.05）")
+print("=" * 62)
+print(f"[1] 原始转化率      A = {x_A}/{n_A} = {p_A*100:.4f}%   "
+      f"B = {x_B}/{n_B} = {p_B*100:.4f}%")
+print(f"    绝对提升        {delta*100:.4f} pp    相对提升 {lift*100:.2f}%")
+print(f"[2] 合并比例        p_pool = {p_pool:.6f}   SE_pool = {se_pool:.6f}")
+print(f"    双比例 z 检验   z = {z_stat:.4f}   p(单侧) = {p_one_sided:.4f}   "
+      f"p(双侧) = {p_two_sided:.4f}")
+print(f"    Pearson 卡方    chi2(1) = {chi2:.4f}   p = {p_chi2:.4f}   "
+      f"(chi2 = z^2 = {z_stat**2:.4f})")
+print(f"[3] 95% CI(双侧)   [{ci_low_2s*100:.4f} pp, {ci_high_2s*100:.4f} pp]")
+print(f"    95% CI(单侧)   下限 = {ci_low_1s*100:.4f} pp")
+print(f"[4] 当前功效        power = {power_obs*100:.2f}%  (n≈1200/组)")
+print(f"    最小样本量      每组 {n_min} 人，合计 {2*n_min} 人；"
+      f"该样本量下 power = {power_at(n_min)*100:.2f}%")
+print("    MDE-样本量      1.0pp -> 7514/组 | 1.5pp -> 3459/组 | "
+      "2.0pp -> 2012/组 | 2.05pp -> 1920/组")
+print(f"[5] SRM 健康检查    chi2(1) = {chi2_srm:.4f}   p = {p_srm:.4f} "
+      f"(A 占比 {n_A/(n_A+n_B)*100:.2f}%)")
+print("[6] 统计决策        p(单侧) < 0.05 -> 拒绝 H0；"
+      "但双侧 CI 含 0，证据强度为临界弱阳性")
+print("=" * 62)
+
+# ----------------------------------------------------------------------
+# 7. 图 1：转化率对比条形图（含 95% CI 与测试信息标注）
+# ----------------------------------------------------------------------
+candidates = ["Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC"]
+available = {f.name for f in font_manager.fontManager.ttflist}
+cn_font = next((f for f in candidates if f in available), None)
+if cn_font:
+    plt.rcParams["font.sans-serif"] = [cn_font]
+else:
+    cn_font = "DejaVu Sans (Latin labels)"
+plt.rcParams["axes.unicode_minus"] = False
+print(f"[7] 图表字体        {cn_font}")
+
+use_cn = cn_font not in ("DejaVu Sans (Latin labels)",)
+labels = ["对照组 A\n原版 UI 布局", "实验组 B\n改版 UI 布局"] if use_cn else ["Control A\nOriginal UI", "Variant B\nRedesigned UI"]
+title = "图 1  A/B 组购买转化率对比（误差线为各组 95% Wilson 置信区间）" if use_cn \
+        else "Figure 1  Purchase conversion rate by group (95% Wilson CI)"
+ylabel = "购买转化率（%）" if use_cn else "Purchase conversion rate (%)"
+
+fig, ax = plt.subplots(figsize=(9.2, 5.4), dpi=200)
+fig.patch.set_facecolor("white")
+ax.set_facecolor("white")
 rates = [p_A * 100, p_B * 100]
-errs = [z_crit_two * math.sqrt(p_A * (1 - p_A) / n_A) * 100,
-        z_crit_two * math.sqrt(p_B * (1 - p_B) / n_B) * 100]
-colors = ["#8C9BAB", "#C0392B"]
-bars = ax.bar(groups, rates, width=0.5, color=colors,
-              yerr=errs, capsize=8, edgecolor="#333333", linewidth=0.8,
-              error_kw=dict(elinewidth=1.4, ecolor="#333333"), zorder=3)
- 
-for i, (b, r, n, x) in enumerate(zip(bars, rates, [n_A, n_B], [x_A, x_B])):
-    ax.text(b.get_x() + b.get_width() / 2, r + errs[i] + 0.22,
-            f"{r:.2f}%  ({x}/{n})", ha="center", va="bottom",
-            fontsize=11.5, fontweight="bold", color="#222222")
- 
-ax.set_ylabel("Purchase conversion rate (%)", fontsize=12)
-ax.set_title("A/B Test: One-Week Purchase Conversion Rate\n"
-             "Error bars = 95% normal-approximation CI (Wald)",
-             fontsize=13, fontweight="bold")
-YMAX = 13.2
-ax.set_ylim(0, YMAX)
-ax.set_yticks(range(0, 14, 2))
+err_low = [p_A * 100 - ci_A[0] * 100, p_B * 100 - ci_B[0] * 100]
+err_high = [ci_A[1] * 100 - p_A * 100, ci_B[1] * 100 - p_B * 100]
+bars = ax.bar(labels, rates, width=0.46, color=["#7CA6D8", "#E8834A"],
+              edgecolor="#333333", linewidth=0.8, zorder=3)
+ax.errorbar([0, 1], rates, yerr=[err_low, err_high], fmt="none",
+            ecolor="#333333", elinewidth=1.3, capsize=9, capthick=1.3, zorder=4)
+for i, (bar, r, xa, na) in enumerate(zip(bars, rates, [x_A, x_B], [n_A, n_B])):
+    ax.text(bar.get_x() + bar.get_width() / 2, r + err_high[i] + 0.45, f"{r:.2f}%",
+            ha="center", va="bottom", fontsize=12, fontweight="bold", color="#222222")
+    ax.text(bar.get_x() + bar.get_width() / 2, r / 2, f"{xa}/{na}",
+            ha="center", va="center", fontsize=10.5, color="white", fontweight="bold")
+ax.set_ylim(0, 11.8)
+ax.set_ylabel(ylabel, fontsize=11)
+ax.set_title(title, fontsize=12.5, fontweight="bold", pad=12)
 ax.yaxis.grid(True, linestyle="--", alpha=0.45, zorder=0)
 ax.set_axisbelow(True)
- 
-# lift bracket
-y_br = 11.2
-ax.annotate("", xy=(1, y_br), xytext=(0, y_br),
-            arrowprops=dict(arrowstyle="<->", color="#C0392B", lw=1.7))
-ax.text(0.5, y_br + 0.22, f"+{diff*100:.2f} pp absolute lift",
-        ha="center", color="#C0392B", fontweight="bold", fontsize=11.5)
- 
-# separate information panel
-ann = (f"TEST INFORMATION\n"
-       f"------------------------------\n"
-       f"n_A = {n_A},   n_B = {n_B}\n"
-       f"x_A = {x_A},     x_B = {x_B}\n"
-       f"------------------------------\n"
-       f"Lift  +{diff*100:.2f} pp\n"
-       f"      +{rel_lift*100:.1f}% relative\n"
-       f"------------------------------\n"
-       f"Pooled z      = {z_stat:.4f}\n"
-       f"One-sided p   = {p_one:.4f}\n"
-       f"Two-sided p   = {p_two:.4f}\n"
-       f"chi2 (1 df)   = {chi2:.4f}\n"
-       f"------------------------------\n"
-       f"alpha = 0.05 (one-sided)\n"
-       f"Decision: REJECT H0\n"
-       f"* two-sided 0.0502 > 0.05\n"
-       f"* 95% CI [{ci95_low*100:+.2f}, {ci95_high*100:+.2f}] pp\n"
-       f"* power = {achieved_power:.1%} (< 80%)")
-ax_info.text(0.02, 0.97, ann, transform=ax_info.transAxes,
-             ha="left", va="top", fontsize=10.2, family="monospace",
-             linespacing=1.62,
-             bbox=dict(boxstyle="round,pad=0.8", facecolor="#F5F7FA",
-                       edgecolor="#8C9BAB", alpha=0.97))
- 
-fig.tight_layout()
-f1 = os.path.join(BASE, "figure1_conversion.png")
-fig.savefig(f1, bbox_inches="tight", facecolor="white")
-plt.close(fig)
- 
-# ----------------------------------------------------------------------------
-# 6. Figure 2 - power curves vs sample size
-# ----------------------------------------------------------------------------
-fig2, ax2 = plt.subplots(figsize=(9.2, 5.2), dpi=180)
-ns = np.linspace(200, 14000, 400)
-for mde, col, lab in [(diff * 100, "#C0392B", f"Observed +{diff*100:.2f} pp"),
-                      (1.0, "#2C6FA6", "MDE +1.0 pp"),
-                      (1.5, "#2E8B57", "MDE +1.5 pp"),
-                      (2.0, "#8E5BB7", "MDE +2.0 pp")]:
-    h = abs(proportion_effectsize(p_A + mde / 100, p_A))
-    pw = power_analysis.power(effect_size=h, nobs1=ns, ratio=1.0,
-                              alpha=ALPHA, alternative="larger")
-    ax2.plot(ns, pw, lw=2.1, color=col, label=lab)
- 
-ax2.axhline(0.80, ls="--", color="#555555", lw=1.2, label="Target power = 0.80")
-ax2.axvline(n_A, ls=":", color="#888888", lw=1.5,
-            label=f"Actual n/group ~ {n_A}")
-for s in R["power"]["sample_size_scenarios"][:1] + R["power"]["sample_size_scenarios"][2:3]:
-    ax2.axvline(s["n_per_group_closed_form"], ls=":", color="#C0392B", alpha=0.45, lw=1.0)
- 
-ax2.set_xlabel("Sample size per group (n)", fontsize=12)
-ax2.set_ylabel("Statistical power (1 - beta)", fontsize=12)
-ax2.set_title("Power Analysis: one-sided alpha = 0.05, baseline p_A = 6.00%",
-              fontsize=13, fontweight="bold")
-ax2.set_ylim(0, 1.03)
-ax2.yaxis.grid(True, ls="--", alpha=0.4)
-ax2.set_axisbelow(True)
-ax2.legend(loc="lower right", fontsize=9.5, framealpha=0.95)
-fig2.tight_layout()
-f2 = os.path.join(BASE, "figure2_power.png")
-fig2.savefig(f2, bbox_inches="tight", facecolor="white")
-plt.close(fig2)
- 
-R["figures"] = [f1, f2]
- 
+for spine in ["top", "right"]:
+    ax.spines[spine].set_visible(False)
+ax.tick_params(axis="x", labelsize=10.5)
+ax.tick_params(axis="y", labelsize=10)
 
-with open(os.path.join(BASE, "results.json"), "w", encoding="utf-8") as f:
-    json.dump(R, f, indent=2, ensure_ascii=False)
- 
-lines = []
-lines.append("=== DSCI 6000 GROUP ASSIGNMENT 1 - NUMERICAL OUTPUT ===")
-lines.append(f"Group A: {x_A}/{n_A} = {p_A:.6f} ({p_A*100:.4f}%)")
-lines.append(f"Group B: {x_B}/{n_B} = {p_B:.6f} ({p_B*100:.4f}%)")
-lines.append(f"Absolute lift = {diff:.6f} ({diff*100:.4f} pp)")
-lines.append(f"Relative lift = {rel_lift*100:.4f}%")
-lines.append("")
-lines.append(f"Pooled p = {p_pool:.8f};  SE_pooled = {se_pool:.8f}")
-lines.append(f"z = {z_stat:.6f};  z_crit(one,0.05) = {z_crit_one:.6f}")
-lines.append(f"p one-sided = {p_one:.6f}  -> reject H0: {p_one < ALPHA}")
-lines.append(f"p two-sided = {p_two:.6f}  -> reject H0: {p_two < ALPHA_TWO}")
-lines.append(f"statsmodels z = {z_sm:.6f}, p = {p_sm:.6f}")
-lines.append("")
-lines.append(f"Chi2 (no correction) = {chi2:.6f}, p = {p_chi:.6f}, dof = {dof}")
-lines.append(f"Chi2 (Yates)         = {chi2_y:.6f}, p = {p_chi_y:.6f}")
-lines.append(f"z^2 = {z_stat**2:.6f}  (equals chi2: {abs(chi2-z_stat**2)<1e-8})")
-lines.append(f"Fisher exact one-sided p = {p_fisher:.6f}; OR = {odds:.6f}")
-lines.append("")
-lines.append(f"SE_unpooled = {se_unpool:.8f}")
-lines.append(f"95% CI diff (pp) = [{ci95_low*100:+.4f}, {ci95_high*100:+.4f}]")
-lines.append(f"One-sided 95% lower bound (pp) = {lower_onesided_95*100:+.4f}")
-lines.append(f"Relative risk = {rr:.6f}; 95% CI rel lift = [{(rr_low-1)*100:+.3f}%, {(rr_high-1)*100:+.3f}%]")
-lines.append(f"Wilson A = {R['ci']['wilson_A']}")
-lines.append(f"Wilson B = {R['ci']['wilson_B']}")
-lines.append("")
-lines.append(f"Cohen's h = {effect_h:.6f}")
-lines.append(f"Achieved power (observed effect, one-sided) = {achieved_power:.4f}")
-lines.append("")
-lines.append("Minimum sample size per group (alpha=0.05 one-sided, power=0.80):")
-for s in scenarios:
-    lines.append(f"  {s['label']:<32} p2={s['p2']:.5f}  n/group={s['n_per_group_closed_form']:>7,}  "
-                 f"(statsmodels {s['n_per_group_statsmodels']:>7,})  total={s['total']:,}")
-lines.append("")
-lines.append("Figures (written next to this script): " +
-             ", ".join(os.path.basename(p) for p in R["figures"]))
-txt = "\n".join(lines)
-with open(os.path.join(BASE, "results.txt"), "w", encoding="utf-8") as f:
-    f.write(txt)
-print(txt)
+info = ("测试信息：观察期 7 天 | 单侧双比例 z 检验 | α = 0.05 | z = 1.9584\n"
+        "p(单侧) = 0.0251（拒绝原假设 H0）| Δ = +2.05 pp（+34.18%）| "
+        "n_A = 1200, n_B = 1180 | 当前功效 ≈ 62.3%")
+fig.text(0.5, 0.025, info, ha="center", va="bottom", fontsize=9.2, color="#333333",
+         bbox=dict(boxstyle="round,pad=0.45", facecolor="#F5F7FA", edgecolor="#C9D2DE", linewidth=0.8))
+plt.tight_layout(rect=[0, 0.135, 1, 1])
+out_png = "C:/Users/zouju/WorkBuddy/2026-11-11-09-28-17/work/conversion_rate_chart.png"
+plt.savefig(out_png, dpi=200, facecolor="white")
+print(f"[8] 图表已保存      {out_png}")
+

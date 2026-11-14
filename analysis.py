@@ -155,7 +155,7 @@ info = ("测试信息：观察期 7 天 | 单侧双比例 z 检验 | α = 0.05 |
 fig.text(0.5, 0.025, info, ha="center", va="bottom", fontsize=9.2, color="#333333",
          bbox=dict(boxstyle="round,pad=0.45", facecolor="#F5F7FA", edgecolor="#C9D2DE", linewidth=0.8))
 plt.tight_layout(rect=[0, 0.135, 1, 1])
-out_png = "C:/Users/zouju/WorkBuddy/2026-11-11-09-28-17/work/conversion_rate_chart.png"
+out_png = "C:/Users/zouju/HPU/DSCI6000/conversion_rate_chart.png"
 plt.savefig(out_png, dpi=200, facecolor="white")
 print(f"[8] 图表已保存      {out_png}")
 
